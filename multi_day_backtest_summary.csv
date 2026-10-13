@@ -1,0 +1,4 @@
+policy,simulated_days,total_requested_refill,total_allocated_refill,total_refill_events,total_shortage_atm_days,total_unmet_demand,average_daily_end_cash,average_daily_budget_utilization_percent,shortage_atm_days_per_1000_atm_days
+ML-only,108,411679446.51,392343704.37,8816,9,53779.81,12413063.54,45.41,0.8333333333333334
+Network-aware,108,411877736.08,392381805.51,8830,2,15678.68,12413984.44,45.41,0.18518518518518517
+Threshold baseline,108,418061626.33,418061626.33,10652,0,0.0,34003452.97,48.39,0.0
