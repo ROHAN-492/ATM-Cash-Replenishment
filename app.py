@@ -99,6 +99,12 @@ def load_latest_dataset(database_url):
 
 
 @st.cache_data(ttl=60)
+def load_replenishment_plan():
+    path = BASE_DIR / "replenishment_recommendations.csv"
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
 def load_backtest_summary():
     path = BASE_DIR / "multi_day_backtest_summary.csv"
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
@@ -140,6 +146,7 @@ try:
     inventory = load_inventory(database_url)
     branches = load_branches(database_url)
     latest_data = load_latest_dataset(database_url)
+    replenishment_plan = load_replenishment_plan()
     summary = load_backtest_summary()
     daily = load_backtest_daily()
     details = load_backtest_details()
@@ -186,22 +193,46 @@ if not latest_data.empty:
         how="left",
     )
 
-    latest_data["suggested_refill"] = (
-        latest_data["predicted_demand"] * 3
-        - (latest_data["current_cash"]
-           - latest_data["predicted_demand"])
-    ).clip(lower=0)
+    
+# Match the replenishment engine's refill policy
+latest_data["projected_cash_after_one_day"] = (
+    latest_data["current_cash"] - latest_data["predicted_demand"]
+).clip(lower=0)
 
-    latest_data["suggested_refill"] = latest_data[
-        ["suggested_refill", "capacity"]
-    ].min(axis=1)
+latest_data["demand_buffer_target"] = (
+    latest_data["predicted_demand"] * 3
+).clip(upper=latest_data["capacity"])
 
-    latest_data["suggested_refill"] = latest_data[
-        "suggested_refill"
-    ].where(
-        latest_data["status"].astype(str).str.upper().eq("ACTIVE"),
-        0,
-    )
+latest_data["minimum_cash_target"] = (
+    latest_data["capacity"] * 0.25
+)
+
+latest_data["target_cash"] = latest_data[
+    ["demand_buffer_target", "minimum_cash_target"]
+].max(axis=1)
+
+latest_data["suggested_refill"] = (
+    latest_data["target_cash"]
+    - latest_data["projected_cash_after_one_day"]
+).clip(lower=0)
+
+# Never exceed the ATM's remaining capacity
+latest_data["capacity_remaining"] = (
+    latest_data["capacity"] - latest_data["current_cash"]
+).clip(lower=0)
+
+latest_data["suggested_refill"] = latest_data[
+    ["suggested_refill", "capacity_remaining"]
+].min(axis=1)
+
+# Inactive ATMs should not receive refill recommendations
+latest_data["suggested_refill"] = latest_data[
+    "suggested_refill"
+].where(
+    latest_data["status"].astype(str).str.strip().str.upper().eq("ACTIVE"),
+    0,
+)
+
 
 # ---------------- OVERVIEW ----------------
 st.header("System Overview")
@@ -227,6 +258,7 @@ page = st.sidebar.radio(
         "Overview",
         "ATM Inventory",
         "Demand Predictions",
+        "Replenishment Plan",
         "Policy Comparison",
         "Backtest Records",
     ],
@@ -360,6 +392,75 @@ elif page == "Demand Predictions":
             file_name="atm_demand_predictions.csv",
             mime="text/csv",
         )
+
+elif page == "Replenishment Plan":
+    st.subheader("Network-Aware ATM Replenishment Plan")
+    st.caption(
+        "This table shows the replenishment engine's ATM-wise request and "
+        "budget-constrained allocation. These are recommendations, not "
+        "confirmed cash deliveries."
+    )
+
+    if replenishment_plan.empty:
+        st.warning(
+            "Replenishment output CSV was not found or is empty. "
+            "Run `python replenishment_engine.py` from your project folder, "
+            "then click **Refresh dashboard**."
+        )
+    else:
+        required = ["requested_refill", "allocated_refill", "unfunded_refill"]
+        missing = [column for column in required if column not in replenishment_plan.columns]
+        if missing:
+            st.error(
+                "The replenishment CSV is missing required columns: "
+                + ", ".join(missing)
+            )
+        else:
+            for column in required:
+                replenishment_plan[column] = pd.to_numeric(
+                    replenishment_plan[column], errors="coerce"
+                ).fillna(0)
+
+            total_requested = replenishment_plan["requested_refill"].sum()
+            total_allocated = replenishment_plan["allocated_refill"].sum()
+            total_unfunded = replenishment_plan["unfunded_refill"].sum()
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("ATMs in plan", f"{len(replenishment_plan):,}")
+            m2.metric("Total Requested", f"₹{total_requested:,.0f}")
+            m3.metric("Total Allocated", f"₹{total_allocated:,.0f}")
+            m4.metric("Total Unfunded", f"₹{total_unfunded:,.0f}")
+
+            view = replenishment_plan.copy()
+            if "branch_name" in view.columns:
+                branch_options = ["All"] + sorted(
+                    view["branch_name"].dropna().astype(str).unique().tolist()
+                )
+                selected_branch = st.selectbox(
+                    "Filter by branch", branch_options, key="replenishment_branch_filter"
+                )
+                if selected_branch != "All":
+                    view = view[view["branch_name"].astype(str) == selected_branch]
+
+            preferred_columns = [
+                "atm_code", "location_name", "branch_name", "predicted_demand",
+                "current_cash", "target_cash", "requested_refill",
+                "allocated_refill", "unfunded_refill", "priority",
+                "recommendation_reason",
+            ]
+            display_columns = [c for c in preferred_columns if c in view.columns]
+            st.dataframe(
+                view[display_columns].sort_values(
+                    "requested_refill", ascending=False
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "Download replenishment plan CSV",
+                view.to_csv(index=False).encode("utf-8"),
+                file_name="replenishment_recommendations.csv",
+                mime="text/csv",
+            )
 
 elif page == "Policy Comparison":
     st.subheader("Multi-Day Policy Comparison")
